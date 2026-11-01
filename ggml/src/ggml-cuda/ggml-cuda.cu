@@ -5018,12 +5018,64 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                     continue;
                 }
 
+                // a producer whose output feeds an mmvq matmul next (a gated activation, or rms_norm+mul) can write the
+                // q8_1 input of that matmul itself; the matmul then finds it in the mmvq_src1 cache and skips quantizing
+                void *              q8_1_out      = nullptr;
+                size_t              q8_1_out_size = 0;
+                const ggml_tensor * q8_1_src      = nullptr;
+                {
+                    int j_next = i + 1;
+                    if (node->op == GGML_OP_GLU) {
+                        q8_1_src = node;
+                    } else if (node->op == GGML_OP_RMS_NORM && i + 1 < cgraph->n_nodes && cgraph->nodes[i + 1]->op == GGML_OP_MUL &&
+                            (cgraph->nodes[i + 1]->src[0] == node || cgraph->nodes[i + 1]->src[1] == node)) {
+                        q8_1_src = cgraph->nodes[i + 1];
+                        j_next   = i + 2;
+                    }
+                    if (q8_1_src && !(q8_1_src->type == GGML_TYPE_F32 && ggml_is_contiguous(q8_1_src) &&
+                            q8_1_src->ne[0] % MATRIX_ROW_PADDING == 0 && q8_1_src->ne[1] <= MMVQ_MAX_BATCH_SIZE &&
+                            q8_1_src->ne[2] == 1 && q8_1_src->ne[3] == 1 && !ggml_cuda_info().devices[cuda_ctx->device].vmm)) {
+                        q8_1_src = nullptr;
+                    }
+                    for (int j = j_next; q8_1_src && j < cgraph->n_nodes; ++j) {
+                        const ggml_tensor * next = cgraph->nodes[j];
+                        if (ggml_cuda_is_view_or_noop(next) || (next->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
+                            continue;
+                        }
+                        if (next->op == GGML_OP_MUL_MAT && next->src[1] == q8_1_src && ggml_is_quantized(next->src[0]->type)) {
+                            cuda_ctx->mmvq_src1_drop();
+                            q8_1_out = cuda_ctx->pool().alloc(ggml_nrows(q8_1_src)*q8_1_src->ne[0]*sizeof(block_q8_1)/QK8_1, &q8_1_out_size);
+                            cuda_ctx->q8_1_out         = q8_1_out;
+                            cuda_ctx->q8_1_out_tensor  = q8_1_src;
+                            cuda_ctx->q8_1_out_written = false;
+                        }
+                        break;
+                    }
+                }
+                // after the producer ran and the cache entries it overwrote were dropped
+                auto q8_1_out_finish = [&]() {
+                    if (!q8_1_out) {
+                        return;
+                    }
+                    cuda_ctx->q8_1_out        = nullptr;
+                    cuda_ctx->q8_1_out_tensor = nullptr;
+                    if (cuda_ctx->q8_1_out_written) {
+                        const ggml_tensor * t = q8_1_src;
+                        cuda_ctx->mmvq_src1 = { t->data, ggml_nbytes(t), { t->ne[0], t->ne[1], t->ne[2], t->ne[3] },
+                            { (int64_t) (t->nb[1]/sizeof(float)), (int64_t) (t->nb[2]/sizeof(float)), (int64_t) (t->nb[3]/sizeof(float)) },
+                            cuda_ctx->stream(), &cuda_ctx->pool(), q8_1_out, q8_1_out_size };
+                    } else {
+                        cuda_ctx->pool().free(q8_1_out, q8_1_out_size);
+                    }
+                };
+
                 int nodes_to_skip = ggml_cuda_try_fuse(cuda_ctx, cgraph, i);
 
                 if (nodes_to_skip != 0) {
                     for (int j = i; j <= i + nodes_to_skip; ++j) {
                         cuda_ctx->mmvq_src1_drop_if_written(cgraph->nodes[j]);
                     }
+                    q8_1_out_finish();
 #ifdef GGML_CUDA_DEBUG
                     const int last_fused = i + nodes_to_skip;
                     GGML_LOG_INFO("nodes_fused: %d, first: %s (%s), last: %s (%s)\n",
@@ -5056,6 +5108,7 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                 }
                 GGML_ASSERT(ok);
                 cuda_ctx->mmvq_src1_drop_if_written(node);
+                q8_1_out_finish();
 
                 if (!is_concurrent_event_active) {
                     try_launch_concurrent_event(node);

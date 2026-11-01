@@ -1589,6 +1589,11 @@ struct ggml_backend_cuda_context {
         size_t           q8_size = 0;
     } mmvq_src1;
 
+    // q8_1 buffer for the producer of the next mmvq input to fill alongside its f32 output (see the graph evaluation)
+    void *              q8_1_out         = nullptr;
+    const ggml_tensor * q8_1_out_tensor  = nullptr; // the producer output that q8_1_out is for
+    bool                q8_1_out_written = false;
+
     void mmvq_src1_drop() {
         if (mmvq_src1.q8) {
             mmvq_src1.pool->free(mmvq_src1.q8, mmvq_src1.q8_size);
