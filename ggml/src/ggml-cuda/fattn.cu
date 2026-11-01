@@ -257,6 +257,13 @@ static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols2(ggml_backend_cuda_con
             return;
         }
 
+        // 5-7 Q heads per K/V head and few tokens: pad the group to 8 so that K/V is read once instead of once per pair of heads.
+        // Large batches are compute bound, the padding would only add work.
+        if (use_gqa_opt && gqa_ratio > 4 && gqa_ratio < 8 && Q->ne[1] <= 16) {
+            ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<DKQ, DV, 8>(ctx, dst);
+            return;
+        }
+
         if (use_gqa_opt && gqa_ratio % 2 == 0) {
             ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<DKQ, DV, 2>(ctx, dst);
             return;
@@ -668,6 +675,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     while (max_bias == 0.0f && gqa_ratio % (2*gqa_ratio_eff) == 0 && gqa_ratio_eff < ncols2_max) {
         gqa_ratio_eff *= 2;
     }
+    if (amd_wmma_available(cc) && gqa_opt_applies && gqa_ratio > 4 && gqa_ratio < 8 && Q->ne[1] <= 16) {
+        gqa_ratio_eff = 8; // padded, see ggml_cuda_flash_attn_ext_mma_f16_switch_ncols2
+    }
 
     if (volta_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72) {
         if (can_use_vector_kernel && Q->ne[1] * gqa_ratio_eff <= 2) {
@@ -693,6 +703,13 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         if (Q->ne[0] > 256 && gqa_opt_applies && Q->ne[1] * gqa_ratio_eff > 128) {
             return BEST_FATTN_KERNEL_MMA_F16;
         }
+    }
+
+    // RDNA: the MMA kernel reads q8_0 K/V directly for padded GQA groups of 5-7 heads with D == 256,
+    //     see ggml_cuda_flash_attn_ext_mma_f16_case, the alternatives convert all of K/V to f16 or are slow for > 1 token.
+    if (amd_wmma_available(cc) && gqa_opt_applies && gqa_ratio > 4 && gqa_ratio < 8 && Q->ne[1] <= 16 && Q->ne[0] == 256 && V->ne[0] == 256 &&
+            K->type == GGML_TYPE_Q8_0 && V->type == GGML_TYPE_Q8_0) {
+        return BEST_FATTN_KERNEL_MMA_F16;
     }
 
     // AMD WMMA is faster than the tile kernel if the wide tiles with high arithmetic intensity can be utilized.
