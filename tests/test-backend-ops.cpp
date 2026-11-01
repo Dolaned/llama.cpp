@@ -12768,6 +12768,26 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
         test_cases.emplace_back(new test_arange(GGML_TYPE_F32, 0.0f, n, 1.0f));
     }
 
+    // qwen4exp verify-step shapes, 4 tokens (local tuning)
+    for (auto [t, m, k] : std::vector<std::tuple<ggml_type, int, int>>{
+            {GGML_TYPE_Q6_K, 2560, 3072}, {GGML_TYPE_Q6_K, 5120, 2560}, {GGML_TYPE_Q6_K, 3072, 2560}, {GGML_TYPE_Q6_K, 6144, 2560}}) {
+        test_cases.emplace_back(new test_mul_mat(t, GGML_TYPE_F32, m, 4, k, {1, 1}, {1, 1}));
+    }
+    for (int n : {1, 2, 4, 8}) {
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32,  GGML_TYPE_F32, 512, n, 2560,  {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32,  GGML_TYPE_F32, 48,  n, 2560,  {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32,  GGML_TYPE_F32, 4,   n, 10240, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_BF16, GGML_TYPE_F32, 512, n, 2560,  {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_BF16, GGML_TYPE_F32, 128, n, 2560,  {1, 1}, {1, 1}));
+    }
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32,  GGML_TYPE_F32, 512,   4, 2560,  {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 10240, 4, 320,   {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 320,   4, 10240, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q6_K, GGML_TYPE_F32, 640,   4, 2560,  {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat_vec_fusion(GGML_TYPE_IQ2_S, GGML_GLU_OP_SWIGLU, 384, 4, 2560, true, 512, 10));
+    test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_IQ2_S,  GGML_TYPE_F32, 512, 10, false, 384, 4, 2560));
+    test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_IQ4_NL, GGML_TYPE_F32, 512, 10, false, 2560, 4, 384));
+
     // delta-net conv input: conv state followed by the transposed qkv of the ubatch
     test_cases.emplace_back(new test_concat(GGML_TYPE_F32, {3, 8192, 1, 1}, 512, 0, 16));
 

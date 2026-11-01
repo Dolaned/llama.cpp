@@ -1184,6 +1184,19 @@ static __device__ __forceinline__ float vec_dot_iq2_xs_q8_1(
 #define VDR_IQ2_S_Q8_1_MMVQ 2
 #define VDR_IQ2_S_Q8_1_MMQ  2
 
+// Negates the bytes of g whose bit in the low nibble of s4 is set. IQ2_S grid bytes are never 0, so on HIP, where the
+// byte-wise compare and subtract are emulated, ~g + 1 negates a byte without a carry into the next one.
+static __device__ __forceinline__ int iq2_s_apply_signs(const int g, const int s4) {
+#if defined(GGML_USE_HIP)
+    const int b = __umul24(s4 & 0x0F, 0x00204081) & 0x01010101; // nibble bit j -> bit 0 of byte j
+    const int m = (b << 8) - b;                                  // 0xFF in the negated bytes
+    return (g ^ m) + b;
+#else
+    const int signs = __vcmpne4(((s4 & 0x03) << 7) | ((s4 & 0x0C) << 21), 0x00000000);
+    return __vsub4(g ^ signs, signs);
+#endif // defined(GGML_USE_HIP)
+}
+
 static __device__ __forceinline__ float vec_dot_iq2_s_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
 
@@ -1206,11 +1219,8 @@ static __device__ __forceinline__ float vec_dot_iq2_s_q8_1(
     for (int l0 = 0; l0 < 8; l0 += 2) {
         const int * grid_pos = (const int *)(iq2s_grid + (qs[l0/2] | ((qh << (8-l0)) & 0x300)));
 
-        const int signs0 = __vcmpne4(((signs_packed_8[l0/2] & 0x03) << 7) | ((signs_packed_8[l0/2] & 0x0C) << 21), 0x00000000);
-        const int signs1 = __vcmpne4(((signs_packed_8[l0/2] & 0x30) << 3) | ((signs_packed_8[l0/2] & 0xC0) << 17), 0x00000000);
-
-        const int grid_l = __vsub4(grid_pos[0] ^ signs0, signs0);
-        const int grid_h = __vsub4(grid_pos[1] ^ signs1, signs1);
+        const int grid_l = iq2_s_apply_signs(grid_pos[0], signs_packed_8[l0/2]);
+        const int grid_h = iq2_s_apply_signs(grid_pos[1], signs_packed_8[l0/2] >> 4);
 
         const int u0 = get_int_b4(bq8_1[iqs/2].qs, l0 + 0);
         const int u1 = get_int_b4(bq8_1[iqs/2].qs, l0 + 1);
