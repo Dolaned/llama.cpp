@@ -1174,7 +1174,10 @@ void launch_fattn(
             return tiles_efficiency_percent < 75;
         };
 
-        const int  max_blocks   = max_blocks_per_sm*nsm;
+        int max_blocks = max_blocks_per_sm*nsm;
+        if (GGML_CUDA_CC_IS_RDNA4(cc) && Q->ne[0] == 256) {
+            max_blocks *= 2; // More blocks fit than the occupancy calculation reports, faster decoding with long KV caches.
+        }
         const bool use_stream_k = should_use_stream_k(cc, ntiles_dst, max_blocks, Q->ne[0]);
 
         blocks_num.x = ntiles_dst;
