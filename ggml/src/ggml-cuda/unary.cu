@@ -303,8 +303,10 @@ void ggml_cuda_op_softplus(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 }
 /* gated ops */
 
-template <float (*op)(float), typename T>
-static __global__ void unary_gated_op_kernel(const T * x, const T * g, T * dst, const int64_t k, const int64_t n, const int64_t o0, const int64_t o1) {
+// do_q8: also write dst as q8_1 blocks of QK8_1 consecutive values, exactly as quantize_q8_1 would (k % QK8_1 == 0)
+template <float (*op)(float), typename T, bool do_q8 = false>
+static __global__ void unary_gated_op_kernel(const T * x, const T * g, T * dst, const int64_t k, const int64_t n, const int64_t o0, const int64_t o1,
+        void * q8 = nullptr) {
     ggml_cuda_pdl_lc();
     const int64_t i = int64_t(blockDim.x)*blockIdx.x + threadIdx.x;
 
@@ -317,14 +319,40 @@ static __global__ void unary_gated_op_kernel(const T * x, const T * g, T * dst, 
     const int64_t j1 = o0 == o1 ? j0 : (i / n) * o1 + (i % n);
 
     ggml_cuda_pdl_sync();
-    dst[i] = ggml_cuda_cast<T>(op(ggml_cuda_cast<float>(x[j0])) * ggml_cuda_cast<float>(g[j1]));
+    const T v = ggml_cuda_cast<T>(op(ggml_cuda_cast<float>(x[j0])) * ggml_cuda_cast<float>(g[j1]));
+    dst[i] = v;
+
+    if constexpr (do_q8) {
+        const float xi = ggml_cuda_cast<float>(v);
+        float amax = fabsf(xi);
+        float sum  = xi;
+
+        amax = warp_reduce_max<QK8_1>(amax);
+        sum  = warp_reduce_sum<QK8_1>(sum);
+
+        const float  d  = amax / 127.0f;
+        const int8_t qi = amax == 0.0f ? 0 : roundf(xi / d);
+
+        block_q8_1 * y = (block_q8_1 *) q8;
+        y[i / QK8_1].qs[i % QK8_1] = qi;
+        if (i % QK8_1 == 0) {
+            y[i / QK8_1].ds = make_half2(d, sum);
+        }
+    }
 }
 
 template <float (*op)(float), typename T>
-static void unary_gated_cuda(const T * x, const T * g, T * dst, const int64_t k, const int64_t n, const int64_t o0, const int64_t o1, cudaStream_t stream) {
+static void unary_gated_cuda(const T * x, const T * g, T * dst, const int64_t k, const int64_t n, const int64_t o0, const int64_t o1, cudaStream_t stream,
+        void * q8 = nullptr) {
     const int64_t num_blocks = (k + CUDA_GLU_BLOCK_SIZE - 1) / CUDA_GLU_BLOCK_SIZE;
     const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params((dim3)num_blocks, CUDA_GLU_BLOCK_SIZE, 0, stream);
-    ggml_cuda_kernel_launch(unary_gated_op_kernel<op, T>, launch_params, x, g, dst, k, n, o0, o1);
+    if (q8) {
+        static_assert(CUDA_GLU_BLOCK_SIZE % QK8_1 == 0, "bad CUDA_GLU_BLOCK_SIZE");
+        GGML_ASSERT(k % QK8_1 == 0);
+        ggml_cuda_kernel_launch(unary_gated_op_kernel<op, T, true>, launch_params, x, g, dst, k, n, o0, o1, q8);
+    } else {
+        ggml_cuda_kernel_launch(unary_gated_op_kernel<op, T>, launch_params, x, g, dst, k, n, o0, o1, nullptr);
+    }
 }
 
 template <float (*op)(float)>
@@ -386,7 +414,11 @@ void ggml_cuda_op_unary_gated(ggml_backend_cuda_context & ctx, ggml_tensor * dst
             src1_p += swapped ? 0 : nc;
         }
 
-        unary_gated_cuda<op>(src0_p, src1_p, (float *)dst_d, ggml_nelements(dst), nc, src0_o / sizeof(float), src1_o / sizeof(float), stream);
+        void * q8 = ctx.q8_1_out_tensor == dst ? ctx.q8_1_out : nullptr;
+        if (q8) {
+            ctx.q8_1_out_written = true;
+        }
+        unary_gated_cuda<op>(src0_p, src1_p, (float *)dst_d, ggml_nelements(dst), nc, src0_o / sizeof(float), src1_o / sizeof(float), stream, q8);
     }
 }
 
