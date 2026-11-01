@@ -450,6 +450,18 @@ void launch_mul_mat_vec_f_cuda(
         }
     }
 
+    // A handful of long rows leaves most of the GPU idle, so give each row the widest block to shorten its K loop
+    if (max_block_size == 256 && nrows*nchannels_dst*nsamples_or_ntokens < 64 && ncols >= 4*1024) {
+        block_size_best = 1024;
+    }
+
+    // RDNA4 slows down several times once a launch exceeds about 32k threads, so trade block width for rows then
+    if (GGML_CUDA_CC_IS_RDNA4(ggml_cuda_info().devices[device].cc) && block_size_best <= 256) {
+        while (block_size_best > warp_size && nrows*nchannels_dst*nsamples_or_ntokens*block_size_best > 32768) {
+            block_size_best = std::max<int64_t>(warp_size, block_size_best/2 / warp_size * warp_size);
+        }
+    }
+
     const bool has_fusion = fusion.gate != nullptr || fusion.x_bias != nullptr || fusion.gate_bias != nullptr;
 
     const int nbytes_shared = warp_size*sizeof(float) + (has_fusion ? warp_size*sizeof(float) : 0);
@@ -500,6 +512,12 @@ void launch_mul_mat_vec_f_cuda(
         } break;
         case  256: {
             mul_mat_vec_f_switch_fusion<T, type_acc, ncols_dst, 256, is_multi_token_id>
+                (x, y, ids, fusion, dst, ncols/2, nchannels_y_fd, stride_row, stride_col_y/2, stride_col_dst,
+                 channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst,
+                 sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst, block_dims, block_nums, nbytes_shared, ids_stride, stream);
+        } break;
+        case 1024: {
+            mul_mat_vec_f_switch_fusion<T, type_acc, ncols_dst, 1024, is_multi_token_id>
                 (x, y, ids, fusion, dst, ncols/2, nchannels_y_fd, stride_row, stride_col_y/2, stride_col_dst,
                  channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst,
                  sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst, block_dims, block_nums, nbytes_shared, ids_stride, stream);
@@ -875,6 +893,10 @@ bool ggml_cuda_should_use_mmvf(enum ggml_type type, int cc, int warp_size, const
             } else if (GGML_CUDA_CC_IS_AMD(cc)) {
                 if (GGML_CUDA_CC_IS_RDNA(cc) && !ggml_cuda_should_use_mmf(type, cc, warp_size, src0_ne, src0_nb, ne11, /*mul_mat_id =*/ false)) {
                     return ne11 <= MMVF_MAX_BATCH_SIZE;
+                }
+                if (GGML_CUDA_CC_IS_RDNA4(cc)) {
+                    // Few rows give the MMF kernel only a handful of blocks, each walking all of K alone
+                    return ne11 <= (src0_ne[1] <= 1024 ? MMVF_MAX_BATCH_SIZE : 5);
                 }
                 if (bf16_mma_hardware_available(cc)) {
                     return ne11 <= 3;
