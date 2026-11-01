@@ -921,8 +921,12 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
                 std::regex_match(tensor_name, pattern_ffn_up_shexp_weight) ||
                 std::regex_match(tensor_name, pattern_ffn_gate_shexp_weight) ||
                 std::regex_match(tensor_name, pattern_ffn_down_shexp_weight)) {
-            const int64_t blck_size_perf = std::lcm(blck_size, 128);
+            int64_t blck_size_perf = std::lcm(blck_size, 128);
             GGML_ASSERT(segments.size() == 1);
+            // an even split that falls between granules leaves one device with more rows to wait for (n_ff_exp = 640 on 2 GPUs)
+            while (blck_size_perf > blck_size && (segments[0].first / (int64_t) ud->n_devices) % blck_size_perf != 0) {
+                blck_size_perf /= 2;
+            }
             return {blck_size_perf};
         }
 
