@@ -1559,12 +1559,28 @@ void ggml_cuda_mul_mat_vec_q(
     }
 
     const int64_t ne10_padded = GGML_PAD(ne10, MATRIX_ROW_PADDING);
-    ggml_cuda_pool_alloc<char> src1_q8_1(ctx.pool(), ne13*ne12 * ne11*ne10_padded * sizeof(block_q8_1)/QK8_1);
-    {
-        const int64_t s11 = src1->nb[1] / ts_src1;
-        const int64_t s12 = src1->nb[2] / ts_src1;
-        const int64_t s13 = src1->nb[3] / ts_src1;
-        quantize_row_q8_1_cuda(src1_d, nullptr, src1_q8_1.get(), src0->type, ne10, s11, s12, s13, ne10_padded, ne11, ne12, ne13, stream);
+    const size_t  q8_size     = ne13*ne12 * ne11*ne10_padded * sizeof(block_q8_1)/QK8_1;
+    // Matmuls that share an input (Q/K/V, gate/up, ...) quantize it once. The VMM pool frees in stack order, so it
+    // cannot hold the copy across ops.
+    const bool can_cache = !ggml_cuda_info().devices[ctx.device].vmm;
+    auto & cache = ctx.mmvq_src1;
+    const int64_t s1x[3] = { (int64_t) (src1->nb[1] / ts_src1), (int64_t) (src1->nb[2] / ts_src1), (int64_t) (src1->nb[3] / ts_src1) };
+    const bool hit = can_cache && cache.q8 && cache.data == src1_d && cache.stream == stream &&
+        cache.ne[0] == ne10 && cache.ne[1] == ne11 && cache.ne[2] == ne12 && cache.ne[3] == ne13 &&
+        cache.s[0] == s1x[0] && cache.s[1] == s1x[1] && cache.s[2] == s1x[2];
+    ggml_cuda_pool_alloc<char> src1_q8_1_tmp(ctx.pool());
+    void * src1_q8_1 = nullptr;
+    if (hit) {
+        src1_q8_1 = cache.q8;
+    } else if (can_cache) {
+        ctx.mmvq_src1_drop();
+        size_t actual = 0;
+        src1_q8_1 = ctx.pool().alloc(q8_size, &actual);
+        quantize_row_q8_1_cuda(src1_d, nullptr, src1_q8_1, src0->type, ne10, s1x[0], s1x[1], s1x[2], ne10_padded, ne11, ne12, ne13, stream);
+        cache = { src1_d, ggml_nbytes(src1), { ne10, ne11, ne12, ne13 }, { s1x[0], s1x[1], s1x[2] }, stream, &ctx.pool(), src1_q8_1, actual };
+    } else {
+        src1_q8_1 = src1_q8_1_tmp.alloc(q8_size);
+        quantize_row_q8_1_cuda(src1_d, nullptr, src1_q8_1, src0->type, ne10, s1x[0], s1x[1], s1x[2], ne10_padded, ne11, ne12, ne13, stream);
     }
 
     const int64_t s01 = src0->nb[1] / ts_src0;
@@ -1590,7 +1606,7 @@ void ggml_cuda_mul_mat_vec_q(
     const int64_t ids_stride = ids ? ids->nb[1] / ggml_type_size(ids->type) : 0;
 
     mul_mat_vec_q_switch_type(
-        src0->data, src0->type, src1_q8_1.get(), ids_d, fusion_local, dst_d, ne00,
+        src0->data, src0->type, src1_q8_1, ids_d, fusion_local, dst_d, ne00,
         ne01,              ncols_dst,     s01, stride_col_y,     stride_col_dst,
         ne02, nchannels_y, nchannels_dst, s02, stride_channel_y, stride_channel_dst,
         ne03,              ne3,           s03, s13,              s3,               ids_stride, stream);
