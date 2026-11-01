@@ -1833,7 +1833,12 @@ static void ggml_backend_sched_copy_input(ggml_backend_sched_t sched, struct ggm
         } else {
             ggml_backend_synchronize(split_backend);
         }
-        ggml_backend_tensor_copy(input, input_cpy);
+        // a blocking copy per input costs a device round trip each; queue it on the split backend instead
+        if (ggml_backend_buffer_is_host(input->buffer) && split_backend->iface.set_tensor_async != NULL) {
+            ggml_backend_tensor_set_async(split_backend, input_cpy, input->data, 0, ggml_nbytes(input));
+        } else {
+            ggml_backend_tensor_copy(input, input_cpy);
+        }
         return;
     }
 
@@ -1853,6 +1858,12 @@ static void ggml_backend_sched_copy_input(ggml_backend_sched_t sched, struct ggm
     // TODO: add public function to facilitate this, since applications do not have direct access to the backend interface
     if (!split_backend->iface.cpy_tensor_async || !split_backend->iface.cpy_tensor_async(input_backend, split_backend, input, input_cpy)) {
         ggml_backend_synchronize(input_backend);
+        // host data such as CPU-side embedding rows: the split backend already waits for its previous use of input_cpy,
+        // and any later split that could reuse the host memory synchronizes with the split backend first
+        if (ggml_backend_buffer_is_host(input->buffer) && split_backend->iface.set_tensor_async != NULL) {
+            ggml_backend_tensor_set_async(split_backend, input_cpy, input->data, 0, ggml_nbytes(input));
+            return;
+        }
         if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
             ggml_backend_event_synchronize(sched->events[split_backend_id][sched->cur_copy]);
         } else {
