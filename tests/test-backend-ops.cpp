@@ -12115,6 +12115,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
 
+    // Prompt-processing sized quantized matmuls (several MMQ tiles in every direction, ragged edges).
+    for (ggml_type type_a : {GGML_TYPE_Q6_K, GGML_TYPE_Q8_0, GGML_TYPE_Q5_K}) {
+        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 1088, 512, 2560, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32,  640, 300, 4352, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32,  200, 129, 1024, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 8704, 2048, 5120, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 3072, 2048, 5120, {1, 1}, {1, 1}));
+    }
+
     // KV-head counts that do not divide the device count
     for (int hs : { 128, 256, 512, }) {
         for (int nh : { 1, 2, 6, }) {
@@ -12596,6 +12605,16 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     test_cases.emplace_back(new test_mul_mat_vec_fusion(GGML_TYPE_IQ2_S, GGML_GLU_OP_SWIGLU, 384, 4, 2560, true, 512, 10));
     test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_IQ2_S,  GGML_TYPE_F32, 512, 10, false, 384, 4, 2560));
     test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_IQ4_NL, GGML_TYPE_F32, 512, 10, false, 2560, 4, 384));
+
+    // Qwen3.8-27B prompt processing with -sm tensor, per GPU: FFN gate/up, FFN down and attention/SSM projections, ubatch 2048.
+    for (ggml_type type_a : {GGML_TYPE_Q6_K, GGML_TYPE_Q8_0, GGML_TYPE_Q5_K}) {
+        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 8704, 2048, 5120, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 5120, 2048, 8704, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 3072, 2048, 5120, {1, 1}, {1, 1}));
+        for (int n : {64, 128, 192, 256, 384, 512, 1024}) {
+            test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 8704, n, 5120, {1, 1}, {1, 1}));
+        }
+    }
 
     // delta-net conv input: conv state followed by the transposed qkv of the ubatch
     test_cases.emplace_back(new test_concat(GGML_TYPE_F32, {3, 8192, 1, 1}, 512, 0, 16));
