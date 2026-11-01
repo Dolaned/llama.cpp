@@ -1525,6 +1525,35 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     }
 };
 
+// greedy draft: the first candidate of a top-k sampler without building and sorting a candidate array over the whole vocab
+// returns the argmax and its probability among the k largest logits, like top-k followed by softmax
+static llama_token draft_greedy_top_k(const float * logits, const int n_vocab, const int k, float & p) {
+    GGML_ASSERT(k >= 1 && k <= 16);
+    float       top_l[16];
+    llama_token top_id[16];
+    int n = 0;
+    for (int i = 0; i < n_vocab; ++i) {
+        const float l = logits[i];
+        if (n == k && l <= top_l[k - 1]) {
+            continue;
+        }
+        int j = n < k ? n++ : k - 1;
+        while (j > 0 && top_l[j - 1] < l) {
+            top_l[j]  = top_l[j - 1];
+            top_id[j] = top_id[j - 1];
+            --j;
+        }
+        top_l[j]  = l;
+        top_id[j] = i;
+    }
+    float sum = 0.0f;
+    for (int j = 0; j < n; ++j) {
+        sum += expf(top_l[j] - top_l[0]);
+    }
+    p = 1.0f / sum;
+    return top_id[0];
+}
+
 struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     common_params_speculative_draft params; // reuses the draft-model params slot (ctx_tgt/ctx_dft)
 
@@ -1867,22 +1896,29 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
                 auto * smpl = smpls[seq_id].get();
 
-                const llama_token id_sampled = common_sampler_sample(smpl, ctx_dft, i_last[seq_id], true);
                 const float * h_row = llama_get_embeddings_nextn_ith(ctx_dft, i_last[seq_id]);
 
-                const auto * cur_p = common_sampler_get_candidates(smpl, true);
+                // add drafted token for each sequence
+                llama_token id;
+                float p_top;
+                const llama_token_data_array * cur_p = nullptr;
+                if (dparams.at(seq_id).result_q) {
+                    id    = common_sampler_sample(smpl, ctx_dft, i_last[seq_id], true);
+                    cur_p = common_sampler_get_candidates(smpl, true);
+                    p_top = cur_p->data[0].p;
 
-                for (int k = 0; k < std::min(3, (int) cur_p->size); ++k) {
-                    SPC_DBG(" - seq_id %d, draft candidate %3d, pos %3d: %6d (%8.3f) '%s'\n",
-                            seq_id, k, i, cur_p->data[k].id, cur_p->data[k].p,
-                            common_token_to_piece(ctx_dft, cur_p->data[k].id).c_str());
+                    for (int k = 0; k < std::min(3, (int) cur_p->size); ++k) {
+                        SPC_DBG(" - seq_id %d, draft candidate %3d, pos %3d: %6d (%8.3f) '%s'\n",
+                                seq_id, k, i, cur_p->data[k].id, cur_p->data[k].p,
+                                common_token_to_piece(ctx_dft, cur_p->data[k].id).c_str());
+                    }
+                } else {
+                    const int n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(llama_get_model(ctx_dft)));
+                    id = draft_greedy_top_k(llama_get_logits_ith(ctx_dft, i_last[seq_id]), n_vocab, 10, p_top);
                 }
 
-                // add drafted token for each sequence
-                const llama_token id = dparams.at(seq_id).result_q ? id_sampled : cur_p->data[0].id;
-
                 // only collect very high-confidence draft tokens
-                if (cur_p->data[0].p < params.p_min) {
+                if (p_top < params.p_min) {
                     drafting[seq_id] = false;
                     n_drafting--;
 
