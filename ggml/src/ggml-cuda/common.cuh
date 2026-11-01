@@ -1570,6 +1570,34 @@ struct ggml_backend_cuda_context {
     ggml_cuda_pool & pool() {
         return pool(device);
     }
+
+    // q8_1 copy of the last src1 that mmvq quantized, so the next matmul on the same input can skip quantizing it.
+    // Dropped at the start and end of each graph and as soon as a node writes over src1.
+    struct mmvq_src1_cache {
+        const void *     data   = nullptr;
+        size_t           nbytes = 0;
+        int64_t          ne[4]  = {};
+        int64_t          s[3]   = {};
+        cudaStream_t     stream = nullptr;
+        ggml_cuda_pool * pool   = nullptr;
+        void *           q8     = nullptr;
+        size_t           q8_size = 0;
+    } mmvq_src1;
+
+    void mmvq_src1_drop() {
+        if (mmvq_src1.q8) {
+            mmvq_src1.pool->free(mmvq_src1.q8, mmvq_src1.q8_size);
+        }
+        mmvq_src1 = {};
+    }
+
+    void mmvq_src1_drop_if_written(const ggml_tensor * t) {
+        const char * d = (const char *) mmvq_src1.data;
+        const char * w = (const char *) t->data;
+        if (mmvq_src1.q8 && w < d + mmvq_src1.nbytes && d < w + ggml_nbytes(t)) {
+            mmvq_src1_drop();
+        }
+    }
 };
 
 struct ggml_cuda_mm_fusion_args_host {
