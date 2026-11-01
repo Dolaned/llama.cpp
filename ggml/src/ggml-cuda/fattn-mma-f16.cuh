@@ -2176,10 +2176,11 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
         }
     }
 
-    // RDNA: read q8_0 K/V directly instead of converting all of K/V to f16 before every call.
+    // RDNA: read q8_0 K/V directly instead of converting all of K/V to f16 before every call,
+    //     which also saves the f16 copies of K/V (they grow with the KV cache during prompt processing).
     bool KV_q8 = false;
 #if defined(GGML_USE_HIP)
-    if constexpr (DKQ == 256 && DV == 256 && ncols2 == 8 && (ncols1 == 2 || ncols1 == 4 || ncols1 == 8)) {
+    if constexpr (DKQ == 256 && DV == 256 && ncols2 >= 2 && ncols1*ncols2 >= 16) {
         const ggml_tensor * K = dst->src[1];
         const ggml_tensor * V = dst->src[2];
         bool aligned = uintptr_t(K->data) % 4 == 0 && uintptr_t(V->data) % 4 == 0;

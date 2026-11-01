@@ -13098,7 +13098,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
 
     // Qwen3.8-27B with -sm tensor, per GPU: 12 Q heads over 2 KV heads (gqa 6), decode with MTP draft 3 (1+3 tokens).
     for (int64_t kv : {32768, 114688, 229376}) {
-        for (int64_t nb : {1, 2, 4, 16}) {
+        for (int64_t nb : {1, 2, 4, 16, 512}) {
             for (ggml_type type_KV : {GGML_TYPE_F16, GGML_TYPE_Q8_0}) {
                 test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {6, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, type_KV, type_KV, {0, 1, 2, 3}, false));
             }
