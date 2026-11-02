@@ -4595,6 +4595,17 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
         return fused_node_count - 1;
     }
 
+    // add -> rms_norm -> mul (a residual add and the next norm): the add's result stays in the graph, the norm kernel writes it
+    if (node->op == GGML_OP_ADD && i + 2 < cgraph->n_nodes && cgraph->nodes[i + 1]->op == GGML_OP_RMS_NORM &&
+            cgraph->nodes[i + 1]->src[0] == node && cgraph->nodes[i + 2]->op == GGML_OP_MUL &&
+            (cgraph->nodes[i + 2]->src[0] == cgraph->nodes[i + 1] || cgraph->nodes[i + 2]->src[1] == cgraph->nodes[i + 1]) &&
+            !(i + 3 < cgraph->n_nodes && cgraph->nodes[i + 3]->op == GGML_OP_ADD &&
+              (cgraph->nodes[i + 3]->src[0] == cgraph->nodes[i + 2] || cgraph->nodes[i + 3]->src[1] == cgraph->nodes[i + 2])) &&
+            ggml_cuda_op_add_rms_norm_fusable(node, cgraph->nodes[i + 1], cgraph->nodes[i + 2])) {
+        ggml_cuda_op_rms_norm_fused(*cuda_ctx, cgraph->nodes[i + 1], cgraph->nodes[i + 2], node);
+        return 2;
+    }
+
     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_ROPE, GGML_OP_VIEW, GGML_OP_SET_ROWS }, {})) {
         ggml_cuda_op_rms_norm_mul_rope_fused(*cuda_ctx, node, cgraph->nodes[i + 1], cgraph->nodes[i + 2], cgraph->nodes[i + 4]);
         return 4;
@@ -4868,6 +4879,11 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                             (cgraph->nodes[i + 1]->src[0] == node || cgraph->nodes[i + 1]->src[1] == node)) {
                         q8_1_src = cgraph->nodes[i + 1];
                         j_next   = i + 2;
+                    } else if (node->op == GGML_OP_ADD && i + 2 < cgraph->n_nodes && cgraph->nodes[i + 1]->op == GGML_OP_RMS_NORM &&
+                            cgraph->nodes[i + 1]->src[0] == node && cgraph->nodes[i + 2]->op == GGML_OP_MUL &&
+                            (cgraph->nodes[i + 2]->src[0] == cgraph->nodes[i + 1] || cgraph->nodes[i + 2]->src[1] == cgraph->nodes[i + 1])) {
+                        q8_1_src = cgraph->nodes[i + 2];
+                        j_next   = i + 3;
                     }
                     if (q8_1_src && !(q8_1_src->type == GGML_TYPE_F32 && ggml_is_contiguous(q8_1_src) &&
                             q8_1_src->ne[0] % MATRIX_ROW_PADDING == 0 && q8_1_src->ne[1] <= MMVQ_MAX_BATCH_SIZE &&
