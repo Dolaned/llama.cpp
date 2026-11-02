@@ -770,6 +770,7 @@ struct llama_model {
 
     // NVFP4 per-tensor scale2, input_scale for LM head
     struct ggml_tensor * output_s    = nullptr;
+    struct ggml_tensor * output_draft = nullptr; // first rows of output for MTP drafts, see load_tensors_draft_head
     struct ggml_tensor * output_in_s = nullptr;
 
     // NextN/MTP model-level projections
@@ -1001,6 +1002,7 @@ struct llama_model_base : public llama_model {
 
     // helper: make the prism.hadamard rotation and sign tensors for the folded weights
     void load_tensors_hadamard();
+    void load_tensors_draft_head();
 
     // helper: read the SWA pattern as one flag per layer, or as a period expanded by set_swa_pattern
     void load_swa_pattern(llama_model_loader & ml, uint32_t n_pattern, bool dense_first = false);

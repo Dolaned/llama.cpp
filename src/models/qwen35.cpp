@@ -656,6 +656,9 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
     ggml_tensor * head_w = layer.nextn.shared_head_head ? layer.nextn.shared_head_head : model.output;
     ggml_tensor * head_s = layer.nextn.shared_head_head ? layer.nextn.shared_head_head_s : model.output_s;
     GGML_ASSERT(head_w && "QWEN35 MTP: missing LM head (nextn.shared_head_head or model.output)");
+    if (!layer.nextn.shared_head_head && model.output_draft) {
+        head_w = model.output_draft;
+    }
     cur = build_lora_mm(head_w, cur, head_s);
     cb(cur, "result_output", -1);
 
