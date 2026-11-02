@@ -1589,6 +1589,13 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     std::vector<std::vector<float>> verify_h;
     std::vector<int32_t> verify_h_rows;
 
+    // LLAMA_MTP_ADAPTIVE=1: draft n_max tokens while most drafts are accepted and n_max - 1 otherwise,
+    //     so the longer draft is only paid for where it pays off (e.g. code, not prose)
+    bool                 adaptive = false;
+    std::vector<float>   acc_avg;   // running share of accepted draft tokens per sequence
+    std::vector<int32_t> n_max_seq; // current draft length per sequence
+    std::vector<int32_t> n_drafted; // tokens this drafter drafted in the last round per sequence
+
     std::vector<int>                i_last;
     std::vector<std::vector<float>> chain_h;
 
@@ -1666,6 +1673,11 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
         verify_h.assign(n_seq, {});
         verify_h_rows.assign(n_seq, 0);
+
+        adaptive = getenv("LLAMA_MTP_ADAPTIVE") != nullptr && this->params.n_max > 1;
+        acc_avg.assign(n_seq, 0.6f);
+        n_max_seq.assign(n_seq, adaptive ? this->params.n_max - 1 : this->params.n_max);
+        n_drafted.assign(n_seq, 0);
     }
 
     ~common_speculative_impl_draft_mtp() override {
@@ -1685,6 +1697,10 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
         // reset here rather than per round, or two identical requests differ
         common_sampler_reset(smpls[seq_id].get());
+        if (adaptive) {
+            acc_avg[seq_id]   = 0.6f;
+            n_max_seq[seq_id] = params.n_max - 1;
+        }
 
         const int32_t N = (int32_t) prompt.size();
         if (N <= 0) {
@@ -1936,7 +1952,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                     dp.result_q->emplace_back(cur_p->data, cur_p->data + cur_p->size);
                 }
 
-                if (params.n_max <= (int) result.size()) {
+                if (n_max_seq[seq_id] <= (int) result.size()) {
                     drafting[seq_id] = false;
                     n_drafting--;
                     continue;
@@ -1986,13 +2002,24 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             if (dp.result->size() < (size_t) params.n_min) {
                 dp.result->clear();
             }
+            n_drafted[seq_id] = (int32_t) dp.result->size();
         }
     }
 
-    void accept(llama_seq_id seq_id, uint16_t n_accepted, bool /*is_other*/) override {
+    void accept(llama_seq_id seq_id, uint16_t n_accepted, bool is_other) override {
         if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
             return;
         }
+
+        if (adaptive && !is_other && n_drafted[seq_id] > 0) {
+            acc_avg[seq_id] = 0.9f*acc_avg[seq_id] + 0.1f*((float) n_accepted / n_drafted[seq_id]);
+            if (n_max_seq[seq_id] < params.n_max && acc_avg[seq_id] > 0.70f) {
+                n_max_seq[seq_id] = params.n_max;
+            } else if (n_max_seq[seq_id] == params.n_max && acc_avg[seq_id] < 0.55f) {
+                n_max_seq[seq_id] = params.n_max - 1;
+            }
+        }
+        n_drafted[seq_id] = 0;
 
         const int32_t n_rows = verify_h_rows[seq_id];
         if (n_rows <= 0) {
