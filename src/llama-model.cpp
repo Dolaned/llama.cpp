@@ -631,6 +631,9 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
             }
             return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_1);
         }
+        if (tensor_name == "output_draft.weight") {
+            return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_1);
+        }
         if (std::regex_match(tensor_name, pattern_output_bias)) {
             const ggml_tensor * output_weight = ud->model->get_tensor("output.weight");
             GGML_ASSERT(output_weight != nullptr);
@@ -2075,8 +2078,55 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     }
 
     load_tensors_hadamard();
+    load_tensors_draft_head();
 
     return true;
+}
+
+// MTP drafts only have to propose likely tokens, the target model verifies every one of them.
+// With LLAMA_DRAFT_HEAD_ROWS=n the draft head is a copy of the first n rows of output (the low token ids are the frequent ones),
+// so each draft step reads n/n_vocab of the output matrix; the logits of the other tokens are -inf.
+void llama_model_base::load_tensors_draft_head() {
+    const char * env = getenv("LLAMA_DRAFT_HEAD_ROWS");
+    if (env == nullptr || output == nullptr || output_s != nullptr || hparams.n_layer_nextn == 0) {
+        return;
+    }
+    const int64_t n_rows = std::min<int64_t>(atoll(env), output->ne[1]);
+    if (n_rows <= 0 || n_rows == output->ne[1]) {
+        return;
+    }
+
+    ggml_init_params params = {
+        /*.mem_size   =*/ ggml_tensor_overhead(),
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ true,
+    };
+    ggml_context_ptr ctx { ggml_init(params) };
+    if (!ctx) {
+        throw std::runtime_error("failed to create draft head context");
+    }
+    ggml_tensor * head = ggml_new_tensor_2d(ctx.get(), output->type, output->ne[0], n_rows);
+    ggml_set_name(head, "output_draft.weight");
+
+    ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(output->buffer);
+    ggml_backend_buffer_ptr buffer { ggml_backend_alloc_ctx_tensors_from_buft(ctx.get(), buft) };
+    if (!buffer) {
+        throw std::runtime_error(format("unable to allocate %s draft head buffer", ggml_backend_buft_name(buft)));
+    }
+    ggml_backend_buffer_set_usage(buffer.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+
+    // a split tensor can only be read whole, the rows are contiguous so the head is a prefix of it
+    std::vector<uint8_t> data(ggml_nbytes(output));
+    ggml_backend_tensor_get(output, data.data(), 0, data.size());
+    ggml_backend_tensor_set(head, data.data(), 0, ggml_nbytes(head));
+
+    LLAMA_LOG_INFO("%s: MTP draft head with the first %lld of %lld output rows (%.1f MiB)\n",
+        __func__, (long long) n_rows, (long long) output->ne[1], ggml_nbytes(head)/1024.0/1024.0);
+
+    std::vector<ggml_backend_buffer_ptr> buffers;
+    buffers.emplace_back(std::move(buffer));
+    pimpl->ctxs_bufs.emplace_back(std::move(ctx), std::move(buffers));
+    output_draft = head;
 }
 
 // read and check the prism.hadamard metadata, and record the folded weights (load_tensors_hadamard makes the tensors)

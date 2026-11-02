@@ -2078,7 +2078,21 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
             if (n_outputs) {
                 GGML_ASSERT( n_outputs_prev + n_outputs <= n_outputs_all);
                 GGML_ASSERT((n_outputs_prev + n_outputs)*n_vocab <= (int64_t) logits.size);
-                ggml_backend_tensor_get_async(backend_res, t_logits, logits_out, 0, n_outputs*n_vocab*sizeof(float));
+                if (t_logits->ne[0] == n_vocab) {
+                    ggml_backend_tensor_get_async(backend_res, t_logits, logits_out, 0, n_outputs*n_vocab*sizeof(float));
+                } else {
+                    // a draft head with the first ne[0] tokens only, the others cannot be drafted
+                    const int64_t n_head = t_logits->ne[0];
+                    GGML_ASSERT(n_head < n_vocab);
+                    std::vector<float> rows((size_t) n_outputs*n_head);
+                    ggml_backend_tensor_get_async(backend_res, t_logits, rows.data(), 0, rows.size()*sizeof(float));
+                    ggml_backend_sched_synchronize(sched.get());
+                    for (int64_t i = 0; i < n_outputs; ++i) {
+                        float * dst = logits_out + i*n_vocab;
+                        std::copy(rows.data() + i*n_head, rows.data() + (i + 1)*n_head, dst);
+                        std::fill(dst + n_head, dst + n_vocab, -INFINITY);
+                    }
+                }
             }
         }
 
