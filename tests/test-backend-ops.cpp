@@ -12911,9 +12911,20 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
         test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {12, 1}, kv, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 1, 2, 3}, true, false, 0));
     }
 
+    // Qwen3.8-27B prompt processing (ubatch 2048) across KV depths.
+    for (int64_t kv : {16384, 65536, 98304, 131072, 163840, 196608, 262144}) {
+        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {6, 1}, kv, 2048, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 1, 2, 3}, false));
+    }
+    // Same with the K/V layout of the KV cache: rows of all heads, a view of a larger buffer.
+    for (int64_t kv : {32768, 114688}) {
+        for (int64_t nb : {512, 2048}) {
+            test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {6, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 2, 1, 3}, true));
+        }
+    }
+
     // Qwen3.8-27B with -sm tensor, per GPU: 12 Q heads over 2 KV heads (gqa 6), decode with MTP draft 3 (1+3 tokens).
     for (int64_t kv : {32768, 114688, 229376}) {
-        for (int64_t nb : {1, 2, 4, 16, 512}) {
+        for (int64_t nb : {1, 2, 4, 16, 512, 2048}) {
             for (ggml_type type_KV : {GGML_TYPE_F16, GGML_TYPE_Q8_0}) {
                 test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {6, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, type_KV, type_KV, {0, 1, 2, 3}, false));
             }
