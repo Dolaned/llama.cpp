@@ -4656,6 +4656,43 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
         return n_fused;
     }
 
+    // consecutive copies with the same layout in one launch,
+    //     e.g. the conv states a recurrent layer keeps for each of the last tokens for speculative rollback
+    if (node->op == GGML_OP_CPY) {
+        const auto overlap = [](const ggml_tensor * x, const ggml_tensor * y) {
+            const char * xd = (const char *) x->data;
+            const char * yd = (const char *) y->data;
+            return xd < yd + ggml_nbytes(y) && yd < xd + ggml_nbytes(x);
+        };
+        const ggml_tensor * src0[GGML_CUDA_CPY_MULTI_MAX];
+        ggml_tensor *       src1[GGML_CUDA_CPY_MULTI_MAX];
+        int n    = 0;
+        int last = i;
+        for (int j = i; j < cgraph->n_nodes && n < GGML_CUDA_CPY_MULTI_MAX; ++j) {
+            ggml_tensor * t = cgraph->nodes[j];
+            if (t->op != GGML_OP_CPY) {
+                if (ggml_cuda_is_view_or_noop(t)) {
+                    continue;
+                }
+                break;
+            }
+            bool depends = false;
+            for (int k = 0; k < n; ++k) {
+                depends = depends || overlap(t->src[0], src1[k]) || overlap(t->src[1], src1[k]) || overlap(t->src[1], src0[k]);
+            }
+            if (depends) {
+                break;
+            }
+            src0[n] = t->src[0];
+            src1[n] = t->src[1];
+            n++;
+            last = j;
+        }
+        if (n >= 2 && ggml_cuda_cpy_multi(*cuda_ctx, src0, src1, n)) {
+            return last - i;
+        }
+    }
+
     return 0;
 }
 
