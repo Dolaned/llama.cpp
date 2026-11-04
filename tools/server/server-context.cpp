@@ -3915,6 +3915,25 @@ private:
             });
         }
 
+        // recurrent memory splits a batch into ubatches with the same number of tokens per sequence, so drafts
+        // of different lengths would cost one forward pass per distinct length: cut them to the shortest
+        if (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && drafting.size() > 1) {
+            size_t n_min = SIZE_MAX;
+            for (auto * slot : drafting) {
+                if (!slot->spec_draft.empty()) {
+                    n_min = std::min(n_min, slot->spec_draft.size());
+                }
+            }
+            for (auto * slot : drafting) {
+                if (slot->spec_draft.size() > n_min) {
+                    slot->spec_draft.resize(n_min);
+                    if (slot->spec_draft_q.size() > n_min) {
+                        slot->spec_draft_q.resize(n_min);
+                    }
+                }
+            }
+        }
+
         // make checkpoints if needed
         iterate(drafting, [&](server_slot & slot) {
             auto & draft = slot.spec_draft;
