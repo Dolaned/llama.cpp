@@ -821,7 +821,11 @@ static constexpr __device__ ggml_cuda_mmq_util_funcs ggml_cuda_mmq_get_util_func
             return ggml_cuda_mmq_util_funcs(
                 -1,
                 ggml_cuda_mmq_load_tiles_q6_K<type, J, fallback, has_fusion>,
+#if defined(RDNA4)
+                ggml_cuda_mmq_vec_dot_q8_0_16_q8_1_mma<type, J, fallback, prec_src1>,
+#else
                 ggml_cuda_mmq_vec_dot_q6_K_q8_1_mma<type, J, fallback>,
+#endif // defined(RDNA4)
                 ggml_cuda_mmq_write_back_mma<type, J, fallback, prec_src1, has_fusion>);
 // ---------------------------------------------------------------------------------------------
         case GGML_TYPE_IQ1_S:
