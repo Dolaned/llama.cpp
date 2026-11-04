@@ -2724,6 +2724,18 @@ private:
     void create_checkpoint(server_slot & slot, const int64_t n_tokens_cur, llama_pos pos_min, llama_pos pos_max) {
         const int id_task = slot.task->id;
 
+        // the new checkpoint reuses the buffers of one it evicts, so a full list allocates no new memory
+        std::vector<uint8_t> spare_tgt;
+        std::vector<uint8_t> spare_dft;
+        const auto keep_buffers = [&](common_prompt_checkpoint & ckpt) {
+            if (spare_tgt.capacity() < ckpt.data_tgt.capacity()) {
+                spare_tgt = std::move(ckpt.data_tgt);
+            }
+            if (spare_dft.capacity() < ckpt.data_dft.capacity()) {
+                spare_dft = std::move(ckpt.data_dft);
+            }
+        };
+
         // evict checkpoints within min-step of a previous checkpoint, unless they were
         // created by the current task
         // only when the list is full, otherwise short prompts keep just the oldest checkpoint
@@ -2735,6 +2747,7 @@ private:
                 SLT_TRC(slot, "erasing context checkpoint too close to an earlier one (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
                         it->pos_min, it->pos_max, it->n_tokens, (float) it->size() / 1024 / 1024);
 
+                keep_buffers(*it);
                 it = slot.prompt.checkpoints.erase(it);
                 continue;
             }
@@ -2750,6 +2763,7 @@ private:
             SLT_WRN(slot, "erasing old context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
                     cur.pos_min, cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
 
+            keep_buffers(slot.prompt.checkpoints.front());
             slot.prompt.checkpoints.erase(slot.prompt.checkpoints.begin());
         }
 
@@ -2759,6 +2773,7 @@ private:
             for (auto it = slot.prompt.checkpoints.begin(); it != slot.prompt.checkpoints.end(); ) {
                 if (it->n_tokens == n_tokens_new) {
                     SLT_TRC(slot, "superseding context checkpoint at n_tokens = %" PRId64 "\n", it->n_tokens);
+                    keep_buffers(*it);
                     it = slot.prompt.checkpoints.erase(it);
                 } else {
                     ++it;
@@ -2768,7 +2783,9 @@ private:
 
         auto & cur = slot.prompt.checkpoints.emplace_back();
 
-        cur.id_task = id_task;
+        cur.id_task  = id_task;
+        cur.data_tgt = std::move(spare_tgt);
+        cur.data_dft = std::move(spare_dft);
 
         // [TAG_CHECKPOINTS_FIX_POS_MIN]
         // TODO: here we incorrectly deterimne that the saved checkpoint data covers the [pos_min, pos_max] range
