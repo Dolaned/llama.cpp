@@ -1836,6 +1836,14 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             }
         }
 
+        // sequences drafting together draft the same length, so the server can verify them in one ubatch
+        int32_t n_max_all = params.n_max;
+        for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
+            if (drafting[seq_id]) {
+                n_max_all = std::min(n_max_all, n_max_seq[seq_id]);
+            }
+        }
+
         int i = 0;
 
         while (n_drafting > 0) {
@@ -1913,7 +1921,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                     dp.result_q->emplace_back(cur_p->data, cur_p->data + cur_p->size);
                 }
 
-                if (n_max_seq[seq_id] <= (int) result.size()) {
+                if (n_max_all <= (int) result.size()) {
                     drafting[seq_id] = false;
                     n_drafting--;
                     continue;
