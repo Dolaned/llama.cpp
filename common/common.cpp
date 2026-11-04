@@ -1,3 +1,6 @@
+#if defined(__linux__)
+#include <sys/mman.h>
+#endif
 #include "ggml.h"
 #include "ggml-cpp.h"
 #include "gguf.h"
@@ -2441,6 +2444,24 @@ void common_prompt_checkpoint::update_pos(
     this->pos_max  = pos_max;
 }
 
+// a checkpoint is ~150 MB for a hybrid model: fresh memory of that size costs tens of thousands of page faults,
+// so a new buffer asks for huge pages before it is first touched
+static void common_checkpoint_buffer_resize(std::vector<uint8_t> & buf, size_t size) {
+    if (buf.capacity() < size) {
+        std::vector<uint8_t>().swap(buf);
+        buf.reserve(size);
+#if defined(__linux__) && defined(MADV_HUGEPAGE)
+        const uintptr_t page  = 4096;
+        const uintptr_t begin = ((uintptr_t) buf.data() + page - 1) & ~(page - 1);
+        const uintptr_t end   = ((uintptr_t) buf.data() + size) & ~(page - 1);
+        if (end > begin) {
+            madvise((void *) begin, end - begin, MADV_HUGEPAGE);
+        }
+#endif
+    }
+    buf.resize(size);
+}
+
 void common_prompt_checkpoint::update_tgt(
         llama_context * ctx,
         llama_seq_id seq_id,
@@ -2451,7 +2472,7 @@ void common_prompt_checkpoint::update_tgt(
 
     const size_t ckpt_size = llama_state_seq_get_size_ext(ctx, seq_id, flags);
 
-    data_tgt.resize(ckpt_size);
+    common_checkpoint_buffer_resize(data_tgt, ckpt_size);
 
     const size_t n = llama_state_seq_get_data_ext(ctx, data_tgt.data(), ckpt_size, seq_id, flags);
     if (n != ckpt_size) {
@@ -2469,7 +2490,7 @@ void common_prompt_checkpoint::update_dft(
 
     const size_t ckpt_size = llama_state_seq_get_size_ext(ctx, seq_id, flags);
 
-    data_dft.resize(ckpt_size);
+    common_checkpoint_buffer_resize(data_dft, ckpt_size);
 
     const size_t n = llama_state_seq_get_data_ext(ctx, data_dft.data(), ckpt_size, seq_id, flags);
     if (n != ckpt_size) {
