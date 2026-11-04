@@ -3445,6 +3445,11 @@ private:
         }
     }
 
+    // while slots are generating, prompt batches alternate with generation: after a batch with prompt tokens,
+    // prompts wait LLAMA_PROMPT_YIELD (default 1.0) times that batch's duration, so a long prompt does not stall the others
+    int64_t t_prompt_next  = 0;
+    bool    prompt_yielded = false; // the current batch has prompt tokens and other slots are generating
+
     // @ngxson : for debugging only
     int64_t t_pre_decode  = 0;
     int64_t t_decode      = 0;
@@ -3627,6 +3632,8 @@ private:
             llama_set_embeddings(ctx_tgt, slot_batched->need_embd());
         }
 
+        const int64_t t_batch_start = ggml_time_us();
+
         int32_t off_next = 0;
         int32_t n_batch = llama_n_batch(ctx_tgt);
         for (int32_t off = 0; off < batch.size(); off = off_next) {
@@ -3665,6 +3672,12 @@ private:
                 abort_all_slots("post_decode() failed: " + std::string(e.what()));
                 break; // stop any further processing
             }
+        }
+
+        if (prompt_yielded) {
+            static const float yield = getenv("LLAMA_PROMPT_YIELD") ? atof(getenv("LLAMA_PROMPT_YIELD")) : 1.0f;
+            const int64_t t_now = ggml_time_us();
+            t_prompt_next = t_now + (int64_t) (yield * (t_now - t_batch_start));
         }
     }
 
@@ -3994,6 +4007,19 @@ private:
         auto & alora_scale       = batch.alora_scale;
         auto & alora_disabled_id = batch.alora_disabled_id;
 
+        bool    any_generating = false;
+        int32_t n_prompting    = 0;
+        for (const auto & slot : slots) {
+            any_generating |= slot.is_processing() && slot.state == SLOT_STATE_GENERATING;
+            n_prompting    += slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED;
+        }
+        const bool prompt_turn = !any_generating || ggml_time_us() >= t_prompt_next;
+
+        // several pending prompts share the batch, so a short one is not stuck behind a long one
+        const int32_t n_prompt_share = n_prompting > 1 ? std::max(n_batch / n_prompting, 256) : n_batch;
+
+        prompt_yielded = false;
+
         // next, batch any pending prompts without exceeding n_batch
         if (params_base.cont_batching || batch.size() == 0) {
             bool add_ok = true; // false means the batch is full, skip remaining slots
@@ -4020,6 +4046,11 @@ private:
 
                 // no prompt, the rows come from the audio stream
                 if (slot.task->type == SERVER_TASK_TYPE_TRANSCRIBE_RT) {
+                    return;
+                }
+
+                // the prompt waits while it is the generating slots' turn
+                if (!prompt_turn && (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED)) {
                     return;
                 }
 
@@ -4480,7 +4511,8 @@ private:
                     const int32_t n_decision_first = slot.task->type == SERVER_TASK_TYPE_DECISION ? slot.task->decision.pos_first() : -1;
 
                     // add prompt tokens for processing in the current batch
-                    while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
+                    while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch &&
+                           batch.size() - n_tokens_prev < n_prompt_share) {
                         // get next token to process
                         llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                         if (cur_tok == LLAMA_TOKEN_NULL) {
@@ -4552,6 +4584,8 @@ private:
 
                     // the number of tokens added to the batch for the current slot
                     const auto n_tokens_cur = batch.size() - n_tokens_prev;
+
+                    prompt_yielded |= any_generating && n_tokens_cur > 0;
 
                     const auto n_tokens_start = slot.prompt.n_tokens() - n_tokens_cur;
 
