@@ -325,18 +325,18 @@ static __global__ void unary_gated_op_kernel(const T * x, const T * g, T * dst, 
     if constexpr (do_q8) {
         const float xi = ggml_cuda_cast<float>(v);
         float amax = fabsf(xi);
-        float sum  = xi;
 
         amax = warp_reduce_max<QK8_1>(amax);
-        sum  = warp_reduce_sum<QK8_1>(sum);
 
         const float  d  = amax / 127.0f;
         const int8_t qi = amax == 0.0f ? 0 : roundf(xi / d);
 
+        const int sum = warp_reduce_sum<QK8_1>((int) qi);
+
         block_q8_1 * y = (block_q8_1 *) q8;
         y[i / QK8_1].qs[i % QK8_1] = qi;
         if (i % QK8_1 == 0) {
-            y[i / QK8_1].ds = make_half2(d, sum);
+            y[i / QK8_1].ds = make_half2(d, d * sum);
         }
     }
 }

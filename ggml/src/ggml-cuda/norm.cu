@@ -210,16 +210,11 @@ static __global__ void rms_norm_f32(const float * x,
                             r.w *= scale_out;
                         }
                         if constexpr (do_q8) {
-                            // a q8_1 block is 8 consecutive float4 of 8 consecutive threads: reduce over them in the order
-                            // of quantize_q8_1 (32 lanes of 1 value) so that the scale and the sum come out identical
+                            // a q8_1 block is 8 consecutive float4 of 8 consecutive threads; like quantize_q8_1 the sum
+                            // is over the quantized values, so it is exact in any order
                             static_assert(QK8_1 == 32, "bad QK8_1");
                             float amax = fmaxf(fmaxf(fabsf(r.x), fabsf(r.y)), fmaxf(fabsf(r.z), fabsf(r.w)));
                             amax = warp_reduce_max<8>(amax);
-                            const float s0 = warp_reduce_sum<8>(r.x);
-                            const float s1 = warp_reduce_sum<8>(r.y);
-                            const float s2 = warp_reduce_sum<8>(r.z);
-                            const float s3 = warp_reduce_sum<8>(r.w);
-                            const float sum = (s0 + s2) + (s1 + s3);
 
                             const float d = amax / 127.0f;
                             char4 q;
@@ -227,12 +222,13 @@ static __global__ void rms_norm_f32(const float * x,
                             q.y = amax == 0.0f ? 0 : (int8_t) roundf(r.y / d);
                             q.z = amax == 0.0f ? 0 : (int8_t) roundf(r.z / d);
                             q.w = amax == 0.0f ? 0 : (int8_t) roundf(r.w / d);
+                            const int sum = warp_reduce_sum<8>(int(q.x) + int(q.y) + int(q.z) + int(q.w));
 
                             block_q8_1 * y = (block_q8_1 *) q8;
                             const int64_t e = (int64_t(sample*nchannels + channel)*nrows + row)*ncols + 4*i;
                             *((char4 *) (y[e / QK8_1].qs + e % QK8_1)) = q;
                             if (e % QK8_1 == 0) {
-                                y[e / QK8_1].ds = make_half2(d, sum);
+                                y[e / QK8_1].ds = make_half2(d, d * sum);
                             }
                         }
                         dst4[i] = r;
