@@ -1031,6 +1031,30 @@ template <ggml_type type, int J, bool fallback, bool has_fusion> static __device
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     }
 
+#if defined(RDNA4)
+    // RDNA4: one float scale d*sc per 16 values (the q3_K layout), read by the faster q8_0_16 dot product
+    constexpr int rows_per_warp = warp_size / 4;
+#pragma unroll
+    for (int i0 = 0; i0 < I; i0 += nwarps*rows_per_warp) {
+        int i = (i0 + threadIdx.y*rows_per_warp + threadIdx.x/4) % I;
+        if (fallback) {
+            i = min(i, i_max);
+        }
+
+        const block_q6_K * bxi = ggml_cuda_mmq_x_row<block_q6_K, has_fusion>(x, x_gate, kbx0, i, stride);
+
+        const int ksc = threadIdx.x % 4;
+        const int sc  = get_int_b2(bxi->scales, ksc);
+        const int8_t * sc8 = (const int8_t *) &sc;
+        const float d = bxi->d;
+
+#pragma unroll
+        for (int l = 0; l < int(sizeof(int)); ++l) {
+            x_df[i*sram_stride + sizeof(int)*ksc + l] = d*sc8[l];
+        }
+    }
+    GGML_UNUSED(x_sc);
+#else
 #pragma unroll
     for (int i0 = 0; i0 < I; i0 += nwarps*warp_size) {
         int i = (i0 + threadIdx.y*warp_size + threadIdx.x) % I;
@@ -1065,6 +1089,7 @@ template <ggml_type type, int J, bool fallback, bool has_fusion> static __device
         x_sc[i*(MMQ_TILE_NE_K/8) + i/8 + threadIdx.x%(MMQ_TILE_NE_K/8)] = get_int_b2(bxi->scales, threadIdx.x%(QI6_K/8));
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     }
+#endif // defined(RDNA4)
 }
 
 // ---------------------------------------------------------------------------------------------
