@@ -1747,14 +1747,17 @@ static void ggml_backend_meta_buffer_get_tensor_n(ggml_backend_buffer_t buffer, 
     };
     std::vector<piece_list> pieces(n_bufs);
 
-    // the rows of a 2D copy (as ggml_backend_tensor_get_2d) on simple buffer j
+    // a piece of one row on simple buffer j is batched; a strided piece of many rows (a range of KV cells) is one
+    // 2D copy, as in ggml_backend_meta_buffer_get_tensor, since one batched entry per row is far slower
     auto add = [&](size_t j, const ggml_tensor * simple_tensor, char * dst, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data) {
-        for (size_t r = 0; r < n_copies; r++) {
-            pieces[j].tensors.push_back(simple_tensor);
-            pieces[j].data.push_back(dst + r*stride_data);
-            pieces[j].offsets.push_back(offset + r*stride_tensor);
-            pieces[j].sizes.push_back(size);
+        if (n_copies > 1) {
+            ggml_backend_tensor_get_2d(simple_tensor, dst, offset, size, n_copies, stride_tensor, stride_data);
+            return;
         }
+        pieces[j].tensors.push_back(simple_tensor);
+        pieces[j].data.push_back(dst);
+        pieces[j].offsets.push_back(offset);
+        pieces[j].sizes.push_back(size);
     };
 
     for (size_t i = 0; i < n_tensors; i++) {
