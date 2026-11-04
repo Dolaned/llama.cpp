@@ -5090,7 +5090,9 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                             q8_1_src->ne[2] == 1 && q8_1_src->ne[3] == 1 && !ggml_cuda_info().devices[cuda_ctx->device].vmm)) {
                         q8_1_src = nullptr;
                     }
-                    for (int j = j_next; q8_1_src && j < cgraph->n_nodes; ++j) {
+                    // the matmul may come a few nodes later (in a delta-net layer the recurrent state is fetched first):
+                    // look past nodes that neither run a matmul nor read the producer's output
+                    for (int j = j_next, n_other = 0; q8_1_src && j < cgraph->n_nodes; ++j) {
                         const ggml_tensor * next = cgraph->nodes[j];
                         if (ggml_cuda_is_view_or_noop(next) || (next->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
                             continue;
@@ -5101,8 +5103,15 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                             cuda_ctx->q8_1_out         = q8_1_out;
                             cuda_ctx->q8_1_out_tensor  = q8_1_src;
                             cuda_ctx->q8_1_out_written = false;
+                            break;
                         }
-                        break;
+                        bool reads_src = false;
+                        for (int k = 0; k < GGML_MAX_SRC && next->src[k]; ++k) {
+                            reads_src |= next->src[k] == q8_1_src || next->src[k]->view_src == q8_1_src;
+                        }
+                        if (next->op == GGML_OP_MUL_MAT || next->op == GGML_OP_MUL_MAT_ID || reads_src || ++n_other > 4) {
+                            break;
+                        }
                     }
                 }
                 // after the producer ran and the cache entries it overwrote were dropped
