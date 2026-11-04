@@ -4007,11 +4007,20 @@ private:
         auto & alora_scale       = batch.alora_scale;
         auto & alora_disabled_id = batch.alora_disabled_id;
 
+        // a prompt with only a few tokens left (a new turn of an agent or chat) skips the wait and takes the batch
+        // without the long prompts, whose chunk would otherwise hold back its result
+        const auto is_short = [](const server_slot & slot) {
+            return slot.task->n_tokens() - slot.prompt.n_tokens() <= 512;
+        };
+
         bool    any_generating = false;
+        bool    any_short      = false;
         int32_t n_prompting    = 0;
         for (const auto & slot : slots) {
+            const bool prompting = slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED;
             any_generating |= slot.is_processing() && slot.state == SLOT_STATE_GENERATING;
-            n_prompting    += slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED;
+            any_short      |= prompting && is_short(slot);
+            n_prompting    += prompting;
         }
         const bool prompt_turn = !any_generating || ggml_time_us() >= t_prompt_next;
 
@@ -4049,8 +4058,9 @@ private:
                     return;
                 }
 
-                // the prompt waits while it is the generating slots' turn
-                if (!prompt_turn && (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED)) {
+                // a long prompt waits while it is the generating slots' turn or a short prompt is pending
+                if ((slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) && !is_short(slot) &&
+                        (!prompt_turn || any_short)) {
                     return;
                 }
 
