@@ -13157,6 +13157,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     for (int64_t kv : {16384, 65536, 98304, 131072, 163840, 196608, 262144}) {
         test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {6, 1}, kv, 2048, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 1, 2, 3}, false));
     }
+    // Agent-turn sized prompt batches at depth, K/V layout of the KV cache.
+    for (int64_t kv : {32768, 98304}) {
+        for (int64_t nb : {64, 128, 192, 256, 320, 384, 768, 1024}) {
+            test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {6, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 2, 1, 3}, true));
+        }
+    }
     // Same with the K/V layout of the KV cache: rows of all heads, a view of a larger buffer.
     for (int64_t kv : {32768, 114688}) {
         for (int64_t nb : {512, 2048}) {

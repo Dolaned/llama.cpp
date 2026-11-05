@@ -1171,7 +1171,8 @@ void launch_fattn(
             if (amd_wmma_available(cc) && DKQ == 64) {
                 return true; // TODO better configuration
             }
-            return tiles_efficiency_percent < 75;
+            // RDNA4: whole tiles at exactly 75% leave a quarter of the GPU idle (e.g. 48 tiles for 64 blocks), stream-K is faster there
+            return tiles_efficiency_percent < (GGML_CUDA_CC_IS_RDNA4(cc) ? 80 : 75);
         };
 
         int max_blocks = max_blocks_per_sm*nsm;
