@@ -1293,6 +1293,9 @@ enum ggml_opt_optimizer_type common_opt_get_optimizer(const char *);
 // prompt utils
 //
 
+// resize buf to size; a new allocation asks for huge pages before it is first touched
+void common_checkpoint_buffer_resize(std::vector<uint8_t> & buf, size_t size);
+
 struct common_prompt_checkpoint {
     int64_t n_tokens;
 

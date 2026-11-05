@@ -1772,6 +1772,31 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
 
     const size_t state_size_new = state_size_tgt + state_size_dft + checkpoints_size;
 
+    // the buffers of the entries removed below are reused for the new one: fresh memory of a state's size
+    // (~150 MiB of recurrent state for a hybrid model) costs a page fault per 4 KiB on its first touch
+    std::vector<std::vector<uint8_t>> spare;
+    const auto keep_buffers = [&](server_prompt_cache_state & state) {
+        spare.push_back(std::move(state.data.main));
+        spare.push_back(std::move(state.data.drft));
+        for (auto & ckpt : state.prompt.checkpoints) {
+            spare.push_back(std::move(ckpt.data_tgt));
+            spare.push_back(std::move(ckpt.data_dft));
+        }
+    };
+    const auto take_buffer = [&](std::vector<uint8_t> & buf, size_t size) {
+        auto best = spare.end();
+        for (auto it = spare.begin(); it != spare.end(); ++it) {
+            if (it->capacity() >= size && (best == spare.end() || it->capacity() < best->capacity())) {
+                best = it;
+            }
+        }
+        if (best != spare.end()) {
+            buf.swap(*best);
+            spare.erase(best);
+        }
+        common_checkpoint_buffer_resize(buf, size);
+    };
+
     // skip over-limit entries to avoid disturbing the cache
     if (limit_size > 0 && state_size_new > limit_size) {
         SRV_WRN(" - prompt state size %.3f MiB exceeds cache size limit %.3f MiB, skipping\n",
@@ -1786,6 +1811,7 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
         if (len == (int) it->prompt.tokens.size()) {
             SRV_TRC(" - removing obsolete cached prompt with length %d\n", len);
 
+            keep_buffers(*it);
             it = states.erase(it);
         } else {
             ++it;
@@ -1798,17 +1824,36 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
             SRV_WRN(" - making room for prompt cache entry, removing oldest entry (size = %.3f MiB)\n",
                     states.front().size() / (1024.0 * 1024.0));
 
+            keep_buffers(states.front());
             states.pop_front();
         }
     }
 
     std::vector<uint8_t> state_data_tgt;
     std::vector<uint8_t> state_data_dft;
+    std::list<common_prompt_checkpoint> checkpoints;
 
     // check if we can allocate enough memory for the new state
     try {
-        state_data_tgt.resize(state_size_tgt);
-        state_data_dft.resize(state_size_dft);
+        take_buffer(state_data_tgt, state_size_tgt);
+        take_buffer(state_data_dft, state_size_dft);
+
+        for (const auto & ckpt : prompt.checkpoints) {
+            auto & cur = checkpoints.emplace_back();
+            cur.n_tokens  = ckpt.n_tokens;
+            cur.id_task   = ckpt.id_task;
+            cur.pos_min   = ckpt.pos_min;
+            cur.pos_max   = ckpt.pos_max;
+            cur.data_spec = ckpt.data_spec;
+            take_buffer(cur.data_tgt, ckpt.data_tgt.size());
+            take_buffer(cur.data_dft, ckpt.data_dft.size());
+            if (!ckpt.data_tgt.empty()) {
+                memcpy(cur.data_tgt.data(), ckpt.data_tgt.data(), ckpt.data_tgt.size());
+            }
+            if (!ckpt.data_dft.empty()) {
+                memcpy(cur.data_dft.data(), ckpt.data_dft.data(), ckpt.data_dft.size());
+            }
+        }
     } catch (const std::bad_alloc & e) {
         SRV_ERR("failed to allocate memory for prompt cache state: %s\n", e.what());
 
@@ -1824,7 +1869,7 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
     states.push_back({
         /*.prompt =*/ {
             /*.tokens      =*/ prompt.tokens.clone(),
-            /*.checkpoints =*/ prompt.checkpoints,
+            /*.checkpoints =*/ std::move(checkpoints),
         },
         /*.data   =*/ {
             /*.main =*/ std::move(state_data_tgt),

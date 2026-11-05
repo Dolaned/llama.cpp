@@ -2446,7 +2446,7 @@ void common_prompt_checkpoint::update_pos(
 
 // a checkpoint is ~150 MB for a hybrid model: fresh memory of that size costs tens of thousands of page faults,
 // so a new buffer asks for huge pages before it is first touched
-static void common_checkpoint_buffer_resize(std::vector<uint8_t> & buf, size_t size) {
+void common_checkpoint_buffer_resize(std::vector<uint8_t> & buf, size_t size) {
     if (buf.capacity() < size) {
         std::vector<uint8_t>().swap(buf);
         buf.reserve(size);
