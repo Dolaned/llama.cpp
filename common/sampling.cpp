@@ -109,6 +109,104 @@ struct ring_buffer {
     std::vector<T> data;
 };
 
+// the k largest logits in descending order, without building the full candidate array: the largest value of each
+// block of 64 bounds the k-th largest from below, so only the values at or above the k-th largest block maximum
+// can be among the top k
+static void common_sampler_top_k_logits(const float * logits, int n_vocab, int k, std::vector<llama_token_data> & out) {
+    constexpr int blk = 64;
+    const int n_blk = (n_vocab + blk - 1) / blk;
+    std::vector<float> blk_max(n_blk);
+    for (int b = 0; b < n_blk; b++) {
+        const int i0 = b*blk;
+        const int i1 = std::min(i0 + blk, n_vocab);
+        float m = -INFINITY;
+        for (int i = i0; i < i1; i++) {
+            m = logits[i] > m ? logits[i] : m;
+        }
+        blk_max[b] = m;
+    }
+    std::vector<float> sel(blk_max);
+    std::nth_element(sel.begin(), sel.begin() + (k - 1), sel.end(), std::greater<float>());
+    const float thr = sel[k - 1];
+
+    out.clear();
+    for (int b = 0; b < n_blk; b++) {
+        if (blk_max[b] < thr) {
+            continue;
+        }
+        const int i1 = std::min((b + 1)*blk, n_vocab);
+        for (llama_token id = b*blk; id < i1; id++) {
+            if (logits[id] >= thr) {
+                out.push_back({ id, logits[id], 0.0f });
+            }
+        }
+    }
+    const auto cmp = [](const llama_token_data & a, const llama_token_data & b) {
+        return a.logit > b.logit || (a.logit == b.logit && a.id < b.id);
+    };
+    std::partial_sort(out.begin(), out.begin() + k, out.end(), cmp);
+    out.resize(k);
+}
+
+// the k of the chain's leading top-k when nothing ahead of it in the chain can change which tokens are the k largest,
+// so the candidates can start as the top k logits instead of the whole vocabulary; 0 if that does not hold
+static int32_t common_sampler_prefilter_k(const llama_vocab * vocab, const common_params_sampling & params) {
+    int32_t n_suppress = 0;
+    llama_vocab_get_suppress_tokens(vocab, &n_suppress);
+    if (params.mirostat != 0 || !params.logit_bias.empty() || n_suppress > 0 || params.n_probs > 0) {
+        return 0;
+    }
+    for (const auto & cnstr : params.samplers) {
+        switch (cnstr) {
+            case COMMON_SAMPLER_TYPE_TOP_K:
+                return params.top_k > 0 && params.top_k <= 128 && params.top_k <= llama_vocab_n_tokens(vocab) ? params.top_k : 0;
+            case COMMON_SAMPLER_TYPE_PENALTIES:
+                if (params.penalty_last_n != 0 && (params.penalty_repeat != 1.0f || params.penalty_freq != 0.0f || params.penalty_present != 0.0f)) {
+                    return 0;
+                }
+                break;
+            case COMMON_SAMPLER_TYPE_DRY:
+                if (params.dry_multiplier != 0.0f && params.dry_base >= 1.0f && params.dry_penalty_last_n != 0) {
+                    return 0;
+                }
+                break;
+            case COMMON_SAMPLER_TYPE_TOP_N_SIGMA:
+                if (params.top_n_sigma > 0.0f) {
+                    return 0;
+                }
+                break;
+            case COMMON_SAMPLER_TYPE_TOP_P:
+                if (params.top_p < 1.0f) {
+                    return 0;
+                }
+                break;
+            case COMMON_SAMPLER_TYPE_MIN_P:
+                if (params.min_p > 0.0f) {
+                    return 0;
+                }
+                break;
+            case COMMON_SAMPLER_TYPE_TYPICAL_P:
+                if (params.typ_p < 1.0f) {
+                    return 0;
+                }
+                break;
+            case COMMON_SAMPLER_TYPE_XTC:
+                if (params.xtc_probability > 0.0f && params.xtc_threshold <= 0.5f) {
+                    return 0;
+                }
+                break;
+            case COMMON_SAMPLER_TYPE_TEMPERATURE:
+                if (params.temp <= 0.0f || params.dynatemp_range > 0.0f) {
+                    return 0;
+                }
+                break;
+            default:
+                return 0;
+        }
+    }
+    return 0;
+}
+
 struct common_sampler {
     common_params_sampling params;
 
@@ -125,13 +223,16 @@ struct common_sampler {
     // for rejection sampling; independent of the draft, or the target distribution is not preserved
     std::mt19937 rng;
 
+    int32_t prefilter_k = 0; // see common_sampler_prefilter_k
+
     void reset() {
         prev.clear();
 
         llama_sampler_reset(chain);
     }
 
-    void set_logits(struct llama_context * ctx, int idx) {
+    // prefilter: the candidates may start as the top prefilter_k logits, see common_sampler_prefilter_k
+    void set_logits(struct llama_context * ctx, int idx, bool prefilter = false) {
         const float *       sampled_probs  = llama_get_sampled_probs_ith     (ctx, idx);
         const float *       sampled_logits = llama_get_sampled_logits_ith    (ctx, idx);
         const llama_token * sampled_ids    = llama_get_sampled_candidates_ith(ctx, idx);
@@ -156,6 +257,12 @@ struct common_sampler {
         } else {
             const auto * logits = llama_get_logits_ith(ctx, idx);
             GGML_ASSERT(logits != nullptr);
+            if (prefilter && prefilter_k > 0 &&
+                    (!rbudget || common_reasoning_budget_get_state(rbudget) != REASONING_BUDGET_FORCING)) {
+                common_sampler_top_k_logits(logits, n_vocab, prefilter_k, cur);
+                cur_p = { cur.data(), cur.size(), -1, true };
+                return;
+            }
             cur.resize(n_vocab);
             for (llama_token token_id = 0; token_id < n_vocab; token_id++) {
                 cur[token_id] = llama_token_data{token_id, logits[token_id], 0.0f};
@@ -442,6 +549,7 @@ struct common_sampler * common_sampler_init(
         // mix it, the chain and the draft are seeded from this one too
         /* .rng     = */ std::mt19937(llama_sampler_get_seed(chain) ^ 0x9e3779b9u),
     };
+    result->prefilter_k = getenv("LLAMA_NO_TOPK_PREFILTER") ? 0 : common_sampler_prefilter_k(vocab, params);
 
     return result;
 }
@@ -516,7 +624,7 @@ void common_sampler_reset(struct common_sampler * gsmpl) {
 }
 
 struct common_sampler * common_sampler_clone(common_sampler * gsmpl) {
-    return new common_sampler {
+    auto * result = new common_sampler {
         /* .params  = */ gsmpl->params,
         /* .grmr    = */ llama_sampler_clone(gsmpl->grmr),
         /* .rbudget = */ llama_sampler_clone(gsmpl->rbudget),
@@ -526,6 +634,8 @@ struct common_sampler * common_sampler_clone(common_sampler * gsmpl) {
         /* .cur_p   = */ gsmpl->cur_p,
         /* .rng     = */ gsmpl->rng,
     };
+    result->prefilter_k = gsmpl->prefilter_k;
+    return result;
 }
 
 void common_sampler_copy(const common_sampler * src, common_sampler * dst) {
@@ -547,6 +657,7 @@ void common_sampler_copy(const common_sampler * src, common_sampler * dst) {
     dst->cur_p.data = src->cur_p.data ? dst->cur.data() : nullptr; // re-point to dst's buffer
     dst->rng        = src->rng;
     dst->t_total_us = src->t_total_us;
+    dst->prefilter_k = src->prefilter_k;
 }
 
 void common_perf_print(const struct llama_context * ctx, const struct common_sampler * gsmpl) {
@@ -616,7 +727,7 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
     auto & chain = gsmpl->chain;
     auto & cur_p = gsmpl->cur_p; // initialized by set_logits
 
-    gsmpl->set_logits(ctx, idx);
+    gsmpl->set_logits(ctx, idx, /*prefilter =*/ !(grammar_first && grammar_should_apply(gsmpl)));
 
     // Check if a backend sampler has already sampled a token in which case we
     // return that token id directly.
